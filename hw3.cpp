@@ -16,6 +16,10 @@ using Eigen::MatrixXd;
 using Eigen::Vector2d;
 using namespace std;
 
+template <typename T> int sgn(T val) {
+    return (T(0) < val) - (val < T(0));
+}
+
 class Grid {
 public:
     double Lx;
@@ -27,8 +31,12 @@ public:
     Eigen::MatrixXd gridY;
     Eigen::MatrixXd kX;
     Eigen::MatrixXd kY;
+    Eigen::MatrixXd kXmod;
+    Eigen::MatrixXd kYmod;
     Eigen::MatrixXd phiExact;
     double error;
+    double mean_phi;
+    double mean_phi_exact;
     // FFTW setup
     fftw_complex *Q,*Q_hat,*phi,*phi_hat;
     fftw_plan forward_p;
@@ -36,7 +44,8 @@ public:
 
     Grid(double Lx_, double Ly_, int Nx_, int Ny_) :
     Lx(Lx_),Ly(Ly_),Nx(Nx_),Ny(Ny_), Nq(Nx_*Ny_),gridX(Nx*Ny,1),gridY(Nx*Ny,1),
-    phiExact(Nx*Ny,1), kX(Nx*Ny,1), kY(Nx*Ny,1), error(0.0){
+    phiExact(Nx*Ny,1), kX(Nx*Ny,1), kY(Nx*Ny,1), kXmod(Nx*Ny,1), kYmod(Nx*Ny,1), error(0.0), mean_phi(0.0),
+    mean_phi_exact(0.0){
         // Don't do in place transforms...requires extra considerations
         Q = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * Nq);
         Q_hat = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * Nq);
@@ -56,21 +65,27 @@ public:
         // Compute forward fourier transform of Q
         fftw_execute(forward_p);
         for (int i=1;i<Nq;i++){
-            phi_hat[i][0] = -Q_hat[i][0] / (kX(i)*kX(i) + kY(i)*kY(i));
-            phi_hat[i][1] = -Q_hat[i][1] / (kX(i)*kX(i) + kY(i)*kY(i));
+            phi_hat[i][0] = -Q_hat[i][0] / (kXmod(i)*kXmod(i) + kYmod(i)*kYmod(i));
+            phi_hat[i][1] = -Q_hat[i][1] / (kXmod(i)*kXmod(i) + kYmod(i)*kYmod(i));
         }
-        // Set the fourier coefficient at (0,0)
-        phi_hat[0][0] = 0.0;
-        phi_hat[0][1] = 0.0;
+        // Set the fourier coefficient at (0,0) to an arbitrary value...it is just the mean
+        phi_hat[0][0] = 1.0;
+        phi_hat[0][1] = 1.0;
         // Compute the inverse fourier transform of phi_hat
         fftw_execute(inverse_p);
         // Normalize the elements of phi by 1/(Nx*Ny)
-        // and compute the error
-        error = 0.0;
+        // and compute the mean value
+        mean_phi = 0.0;
         for (int i=0;i<Nq;i++) {
             phi[i][0] = phi[i][0]/(Nx*Ny);
             phi[i][1] = phi[i][1]/(Nx*Ny);
-            error += abs(phi[i][0]-phiExact(i));
+            mean_phi += phi[i][0];
+        }
+        mean_phi /= Nq;
+        // Compute the error
+        error = 0.0;
+        for (int i=0;i<Nq;i++) {
+            error += abs((phi[i][0]-mean_phi)-(phiExact(i)-mean_phi_exact));
         }
         error = error/Nq;
         fftw_destroy_plan(forward_p);
@@ -80,21 +95,22 @@ public:
 
     void computeGridCoordinates() {
         // Grid goes from -Lx/2 <= x <= Lx/2, -Ly/2 <= y <= Ly/2
-        double dx = Lx/(Nx-1);
-        double dy = Ly/(Ny-1);
+        double dx = Lx/Nx;
+        double dy = Ly/Ny;
         double y = Ly/2.0;
         for (int j=0;j<Ny;j++) {
             double x = -Lx/2.0;
             for (int i=0;i<Nx;i++) {
                 gridX(i+Nx*j) = x;
                 gridY(i+Nx*j) = y;
-                kX(i+Nx*j) = i;
-                kY(i+Nx*j) = j;
-//                if(i>Nx/2){kX(i+Nx*j)=-(Nx-i)*2*M_PI/Lx;}
-//                if(j>Ny/2){kY(i+Nx*j)=-(Ny-i)*2*M_PI/Ly;}
+                kX(i+Nx*j) = 2*M_PI/Lx*i;
+                kY(i+Nx*j) = 2*M_PI/Ly*j;
+                if(i>Nx/2){kX(i+Nx*j)=-(Nx-i)*2*M_PI/Lx;}
+                if(j>Ny/2){kY(i+Nx*j)=-(Ny-j)*2*M_PI/Ly;}
                 x+=dx;
-//                std::cout<<"(x,y)"<<"("<<gridX(i+Nx*j)<<","<<gridY(i+Nx*j)<<")"<<std::endl;
-                std::cout<<"(kx,ky)"<<"("<<kX(i+Nx*j)<<","<<kY(i+Nx*j)<<")"<<std::endl;
+                // Compute the modified wavenumbers
+                kXmod(i+Nx*j) = 2/dx*sin(kX(i+Nx*j)*dx/2)*sgn(kX(i+Nx*j));
+                kYmod(i+Nx*j) = 2/dy*sin(kY(i+Nx*j)*dy/2)*sgn(kY(i+Nx*j));
             }
             y-=dy;
         }
@@ -110,16 +126,19 @@ public:
 
     void computeSol() {
         // Everything in FFTW is in row major order
+        mean_phi_exact = 0.0;
         for (int i=0;i<Nq;i++) {
             phiExact(i) = computePhiExact(gridX(i),gridY(i));
+            mean_phi_exact += phiExact(i);
         }
+        mean_phi_exact /= Nq;
     }
 
-    double computeQ (double x,double y) {
+    static double computeQ (double x,double y) {
         return M_PI*M_PI*exp(cos(M_PI*x)+cos(M_PI*y)) * (-sin(M_PI*x)*sin(M_PI*x)+cos(M_PI*x)-sin(M_PI*y)*sin(M_PI*y)+cos(M_PI*y));
     }
 
-    double computePhiExact(double x, double y) {
+    static double computePhiExact(double x, double y) {
         return -exp(cos(M_PI*x)+cos(M_PI*y));
     }
 
@@ -141,27 +160,27 @@ public:
 };
 
 int main() {
-    Grid grid(2.0,2.0,50,50);
-    grid.poissonSolver();
-    grid.writeToCSV();
-    std::cout<<"e: " <<grid.error<<std::endl;
+//    Grid grid(2.0,2.0,100,100);
+//    grid.poissonSolver();
+//    grid.writeToCSV();
+//    std::cout<<"e: " <<grid.error<<std::endl;
 
-//    int Ne = 10;
-//    Eigen::MatrixXd e(Ne,1);
-//    Eigen::MatrixXd n(Ne,1);
-//    int Nx = 0;
-//    int Ny = 0;
-//    for (int i=0;i<Ne;i++) {
-//        Nx+=5;
-//        Ny+=5;
-//        std::cout<<"i: "<<i<<std::endl;
-//        Grid grid(2.0,2.0,Nx,Ny);
-//        grid.poissonSolver();
-//        e(i) = grid.error;
-//        n(i) = Nx*Ny;
-//        if (i==Ne-1) {grid.writeToCSV();}
-//    }
-//    saveData("e.csv",e);
-//    saveData("n.csv",n);
+    int Ne = 100;
+    Eigen::MatrixXd e(Ne,1);
+    Eigen::MatrixXd n(Ne,1);
+    int Nx = 0;
+    int Ny = 0;
+    for (int i=0;i<Ne;i++) {
+        Nx+=5;
+        Ny+=5;
+        std::cout<<"i: "<<i<<std::endl;
+        Grid grid(2.0,2.0,Nx,Ny);
+        grid.poissonSolver();
+        e(i) = grid.error;
+        n(i) = Nx*Ny;
+        if (i==Ne-1) {grid.writeToCSV();}
+    }
+    saveData("e.csv",e);
+    saveData("n.csv",n);
     return 0;
 }
