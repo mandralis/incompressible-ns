@@ -28,13 +28,14 @@ public:
     double T,dt;
     int Nt;
     // Velocity field and pressure field in row major order on staggered grid
-    MatrixXd u,v;
+    MatrixXd u,v,uT,vT;
     // Interpolated quantities (at cell corners)
     MatrixXd uq,vq;
     // Interpolated quantities (at cell centers)
     MatrixXd um,vm;
     // Spatial Derivatives
     MatrixXd div;
+    MatrixXd omega,omegaT;
     MatrixXd lapU, lapV;
     MatrixXd convU, convV;
     MatrixXd duvdx, duvdy;
@@ -53,14 +54,15 @@ public:
 
     // Constructor
     Simulation(double Re_, double Lx_, double Ly_, double T_, int Nx_, int Ny_, int Nt_)
-      : Re(Re_), Lx(Lx_),Ly(Ly_),T(T_), Nx(Nx_),Ny(Ny_),Nt(Nt_),dx(Lx_/Nx_),dy(Ly_/Ny_),dt(T_/Nt_),Nxs(Nx_-1),Nys(Ny_-1),
+      : Re(Re_), Lx(Lx_),Ly(Ly_),T(T_), Nx(Nx_),Ny(Ny_),Nt(Nt_),dx(Lx_/Nx_),dy(Ly_/Ny_),dt(T_/Nt_),Nxs(Nx_),Nys(Ny_),
         Nq(Nxs*Nys), u(Nq,1), v(Nq,1), uq(Nq,1), vq(Nq,1),lapU(Nq,1), lapV(Nq,1),
         duvdx(Nq,1), duvdy(Nq,1), duvdxC(Nq,1), duvdyC(Nq,1), duudx(Nq,1), dvvdy(Nq,1),
-        convU(Nq,1), convV(Nq,1), dudt(Nq,1), dvdt(Nq,1), um(Nq,1), vm(Nq,1), div(Nq,1),
-        dpdx(Nq,1), dpdy(Nq,1), gridX(Nq,1), gridY(Nq,1){
-        std::cout << "Constructor" << std::endl;
+        convU(Nq,1), convV(Nq,1), dudt(Nq,1), dvdt(Nq,1), um(Nq,1), vm(Nq,1), div(Nq,1),omega(Nq,1),
+        dpdx(Nq,1), dpdy(Nq,1), gridX(Nq,1), gridY(Nq,1), kX(Nq,1), kY(Nq,1), kXmod(Nq,1), kYmod(Nq,1),
+        uT(Nq,1), vT(Nq,1),omegaT(Nq,1){
         // Compute the grid coordinates and wavenumbers needed for the poisson equation
         computeGridCoordinates();
+        writeGridCoordinates();
         // Don't do in place transforms...requires extra considerations
         f = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * Nq);
         f_hat = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * Nq);
@@ -68,7 +70,6 @@ public:
         p_hat = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * Nq);
         forward_plan = fftw_plan_dft_2d(Nx, Ny, f, f_hat, FFTW_FORWARD, FFTW_MEASURE);
         inverse_plan = fftw_plan_dft_2d(Nx, Ny, p_hat, p, FFTW_BACKWARD, FFTW_MEASURE);
-        std::cout << "Constructor done" << std::endl;
     }
     ~Simulation() {
         fftw_destroy_plan(forward_plan);
@@ -84,16 +85,12 @@ public:
         VectorXd k2v(Nq,1);
         VectorXd k3v(Nq,1);
         // Step 1
-        std::cout << "computeRHS" << std::endl;
         computeRHS();
-        std::cout << "computeRHS done" << std::endl;
         k1u = dt * dudt;
         k1v = dt * dvdt;
         u = u + 0.5 * k1u;
         v = v + 0.5 * k1v;
-        std::cout << "computeProjectionStep" << std::endl;
         computeProjectionStep();
-        std::cout << "computeProjectionStep done" << std::endl;
         // Step 2
         computeRHS();
         k2u = dt * dudt;
@@ -108,11 +105,12 @@ public:
         u = u + 7.0/6.0 * k1u -  4.0/3.0 * k2u + 1.0/6.0 * k3u;
         v = v + 7.0/6.0 * k1v -  4.0/3.0 * k2v + 1.0/6.0 * k3v;
         computeProjectionStep();
+        // Compute the vorticity for visualization
+        computeVorticity();
     }
 
     void computeGridCoordinates() {
-        // Grid goes from -Lx/2 <= x <= Lx/2, -Ly/2 <= y <= Ly/2
-        std::cout << "computeGridCoordinates" << std::endl;
+        // Grid goes from -Lx/2 <= x <= Lx/2-dx, -Ly/2 + dy <= y <= Ly/2
         double y = Ly/2.0;
         for (int j=0;j<Ny;j++) {
             double x = -Lx/2.0;
@@ -127,10 +125,10 @@ public:
                 // Compute the modified wavenumbers
                 kXmod(i+Nx*j) = 2/dx*sin(kX(i+Nx*j)*dx/2)*sgn(kX(i+Nx*j));
                 kYmod(i+Nx*j) = 2/dy*sin(kY(i+Nx*j)*dy/2)*sgn(kY(i+Nx*j));
+//                std::cout << "("<<gridX(i+Nx*j)<<","<<gridY(i+Nx*j)<<")"<<std::endl;
             }
             y-=dy;
         }
-        std::cout << "computeGridCoordinatesDone" << std::endl;
     }
 
     void computeRHSPoisson() {
@@ -185,9 +183,21 @@ public:
         // since this is where the pressure is advanced
         interpUVCenter();
         int iX_,iXX,iY_,iYY;
+        double meanDiv = 0.0;
         for (int i=0;i<Nq;i++) {
             getAdjacentIndices(i, iX_,iXX,iY_,iYY);
             div(i) = 1/(2*dx) * (u(iXX)-u(iX_)) + 1/(2*dy) * (v(iYY)-v(iY_));
+            meanDiv += div(i);
+        }
+        meanDiv/=Nq;
+        std::cout<<"Mean divergence is: "<<meanDiv<<std::endl;
+    }
+
+    void computeVorticity() {
+        int iX_,iXX,iY_,iYY;
+        for (int i=0;i<Nq;i++) {
+            getAdjacentIndices(i, iX_,iXX,iY_,iYY);
+            omega(i) = 1/(2*dx) * (v(iXX)-v(iX_)) - 1/(2*dy) * (u(iYY)-u(iY_));
         }
     }
 
@@ -286,19 +296,85 @@ public:
             duvdy(i) = 0.5*(duvdyC(i) + duvdyC(iY_));
         }
     }
+
+    void setTaylorGreenIC() {
+        double A,a,B,b;
+        A=1.0;a=1.0;B=-1.0;b=1.0;
+        double x,y;
+        for (int i=0;i<Nq;i++) {
+            x = gridX(i);
+            y = gridY(i);
+            u(i) = A*sin(a*x)*cos(b*y);
+            v(i) = B*cos(a*x)*sin(b*y);
+        }
+        computeVorticity();
+    }
+
+    void computeTaylorGreenError(double t) {
+        double x,y;
+        double error = 0.0;
+        for (int i=0;i<Nq;i++) {
+            x = gridX(i);
+            y = gridY(i);
+            uT(i) = sin(x)*cos(y)*exp(-2*t/Re);
+            vT(i) = -cos(x)*sin(y)*exp(-2*t/Re);
+            omegaT(i) = 2*sin(x)*sin(y)*exp(-2*t/Re);
+            error = abs(uT(i)-u(i)) + abs(vT(i)-v(i));
+        }
+        error/=(2*Nq);
+        std::cout<<"error: "<<error<<std::endl;
+    }
+
+    void writeUV(const int &iter) {
+        // Writes the solution u,v to a CSV file
+        ofstream fu,fv,fomega;
+        fu.open("u_" + std::to_string(iter) + ".csv");
+        fv.open("v_" + std::to_string(iter) + ".csv");
+        fomega.open("omega_" + std::to_string(iter) + ".csv");
+        for (int i=0;i<Nq;i++){
+            fu << uT(i) <<",";
+            fv << vT(i)<<",";
+            fomega << omegaT(i)<<",";
+        }
+        fu.close();
+        fv.close();
+        fomega.close();
+    }
+
+    void writeGridCoordinates() {
+        // Writes the gridCoordinates
+        ofstream fu;
+        ofstream fv;
+        ofstream fgrid;
+        fgrid.open("grid.csv");
+        for (int i=0;i<Nq;i++){
+            fgrid << gridX(i)<<","<<gridY(i)<<std::endl;
+        }
+        fgrid.close();
+    }
 };
 
 int main() {
     double Re = 1000;
-    double Lx = 1.0;
-    double Ly = 1.0;
-    double Nx = 64;
-    double Ny = 64;
-    double T = 0.1;
-    double Nt = 1000;
+    double Lx = 1*2*M_PI;
+    double Ly = 1*2*M_PI;
+    double Nx = 128;
+    double Ny = 128;
+    double T = 1;
+    double Nt = 100;
+
     Simulation sim(Re, Lx, Ly, T, Nx, Ny,Nt);
-    for (int i=0;i<Nt;i++) {
+    sim.setTaylorGreenIC();
+    sim.writeUV(0);
+    sim.computeTaylorGreenError(0.0);
+
+    double t =sim.dt;
+    for (int i=1;i<Nt;i++) {
+        std::cout<<"iter="<<i<<std::endl;
         sim.advance();
+        sim.writeUV(i);
+        sim.computeTaylorGreenError(t);
+        t += sim.dt;
     }
     return 0;
 }
