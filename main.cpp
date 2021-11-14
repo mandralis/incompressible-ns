@@ -109,11 +109,21 @@ public:
         computeVorticity();
     }
 
+    void advanceEuler() {
+        // Step 1
+        computeRHS();
+        u = u + dt * dudt;
+        v = v + dt * dvdt;
+        computeProjectionStep();
+        // Compute the vorticity for visualization
+        computeVorticity();
+    }
+
     void computeGridCoordinates() {
-        // Grid goes from -Lx/2 <= x <= Lx/2-dx, -Ly/2 + dy <= y <= Ly/2
-        double y = Ly/2.0;
+        // Grid goes from 0 <= x <= 2*pi*Lx-dx, dy <= y <= Ly
+        double y = Ly;
         for (int j=0;j<Ny;j++) {
-            double x = -Lx/2.0;
+            double x = 0.0;
             for (int i=0;i<Nx;i++) {
                 gridX(i+Nx*j) = x;
                 gridY(i+Nx*j) = y;
@@ -134,7 +144,7 @@ public:
     void computeRHSPoisson() {
         computeDivergence();
         for (int i=0;i<Nq;i++) {
-            f[i][0] = dt * div(i);
+            f[i][0] = div(i);
             f[i][1] = 0.0;
         }
     }
@@ -171,7 +181,7 @@ public:
         v = v - dt * dpdy;
     }
 
-    void computeRHS() {
+    void computeRHS()  {
         computeLaplacian();
         computeConvectiveTerm();
         dudt = -convU + lapU/Re;
@@ -186,7 +196,7 @@ public:
         double meanDiv = 0.0;
         for (int i=0;i<Nq;i++) {
             getAdjacentIndices(i, iX_,iXX,iY_,iYY);
-            div(i) = 1/(2*dx) * (u(iXX)-u(iX_)) + 1/(2*dy) * (v(iYY)-v(iY_));
+            div(i) = 1/(2*dx) * (um(iXX)-um(iX_)) + 1/(2*dy) * (vm(iYY)-vm(iY_));
             meanDiv += div(i);
         }
         meanDiv/=Nq;
@@ -206,8 +216,8 @@ public:
         int iX_,iXX,iY_,iYY;
         for (int i=0;i<Nq;i++) {
             getAdjacentIndices(i, iX_,iXX,iY_,iYY);
-            dpdx(i) = 1/(2*dx) * (u(iXX)-u(iX_));
-            dpdy(i) = 1/(2*dy) * (v(iYY)-v(iY_));
+            dpdx(i) = 1/(2*dx) * (p[iXX][0]-p[iX_][0]);
+            dpdy(i) = 1/(2*dy) * (p[iYY][0]-p[iY_][0]);
         }
     }
 
@@ -294,6 +304,7 @@ public:
             getAdjacentIndices(i, iX_,iXX,iY_,iYY);
             duvdx(i) = 0.5*(duvdxC(i) + duvdxC(iXX));
             duvdy(i) = 0.5*(duvdyC(i) + duvdyC(iY_));
+//            std::cout<<"("<<duvdx(i)<<","<<duvdy(i)<<")"<<std::endl;
         }
     }
 
@@ -304,10 +315,21 @@ public:
         for (int i=0;i<Nq;i++) {
             x = gridX(i);
             y = gridY(i);
-            u(i) = A*sin(a*x)*cos(b*y);
-            v(i) = B*cos(a*x)*sin(b*y);
+            double perturbation = 0.0;
+//            if (i%2==0){perturbation = 0.1;}
+            u(i) = A*sin(a*x)*cos(b*y) + perturbation;
+            v(i) = B*cos(a*x)*sin(b*y) - perturbation;
         }
         computeVorticity();
+    }
+
+    void setTestIC() {
+        for (int i=0;i<Nq;i++) {
+            u(i) = i+1;
+            v(i) = i+1;
+            duvdxC(i) = i+1;
+            duvdyC(i) = i+1;
+        }
     }
 
     void computeTaylorGreenError(double t) {
@@ -332,9 +354,9 @@ public:
         fv.open("v_" + std::to_string(iter) + ".csv");
         fomega.open("omega_" + std::to_string(iter) + ".csv");
         for (int i=0;i<Nq;i++){
-            fu << uT(i) <<",";
-            fv << vT(i)<<",";
-            fomega << omegaT(i)<<",";
+            fu << u(i) <<",";
+            fv << v(i)<<",";
+            fomega << omega(i)<<",";
         }
         fu.close();
         fv.close();
@@ -355,19 +377,23 @@ public:
 };
 
 int main() {
-    double Re = 1000;
-    double Lx = 1*2*M_PI;
-    double Ly = 1*2*M_PI;
-    double Nx = 128;
-    double Ny = 128;
-    double T = 1;
-    double Nt = 100;
+    double Re = 100;
+    double Lx = 2*M_PI;
+    double Ly = 2*M_PI;
+    double Nx = 64;
+    double Ny = 64;
+    double T = 2;
+    double Nt = 1000;
 
     Simulation sim(Re, Lx, Ly, T, Nx, Ny,Nt);
+//    sim.setTestIC();
+    // Test interpolation functions
+//    sim.interpCrossTermCornerToFace();
+
     sim.setTaylorGreenIC();
     sim.writeUV(0);
     sim.computeTaylorGreenError(0.0);
-
+//
     double t =sim.dt;
     for (int i=1;i<Nt;i++) {
         std::cout<<"iter="<<i<<std::endl;
@@ -376,7 +402,7 @@ int main() {
         sim.computeTaylorGreenError(t);
         t += sim.dt;
     }
-    return 0;
+//    return 0;
 }
 
 
