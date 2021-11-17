@@ -5,6 +5,7 @@
 #include <vector>
 #include <eigen-io.h>
 #include <fftw3.h>
+#include <random>
 
 #define _USE_MATH_DEFINES
 
@@ -41,9 +42,9 @@ public:
     MatrixXd duvdx, duvdy;
     MatrixXd duvdxC, duvdyC;
     MatrixXd duudx, dvvdy;
-    MatrixXd dpdx,dpdy;
+    MatrixXd dpdxm,dpdym,dpdx,dpdy;
     // Time Derivatives
-    MatrixXd dudt,dvdt;
+    MatrixXd dudt,dvdt,dudtT,dvdtT;
     // Grid and Poisson setup
     Eigen::MatrixXd gridX,gridY;
     Eigen::MatrixXd kX,kY;
@@ -58,8 +59,8 @@ public:
         Nq(Nxs*Nys), u(Nq,1), v(Nq,1), uq(Nq,1), vq(Nq,1),lapU(Nq,1), lapV(Nq,1),
         duvdx(Nq,1), duvdy(Nq,1), duvdxC(Nq,1), duvdyC(Nq,1), duudx(Nq,1), dvvdy(Nq,1),
         convU(Nq,1), convV(Nq,1), dudt(Nq,1), dvdt(Nq,1), um(Nq,1), vm(Nq,1), div(Nq,1),omega(Nq,1),
-        dpdx(Nq,1), dpdy(Nq,1), gridX(Nq,1), gridY(Nq,1), kX(Nq,1), kY(Nq,1), kXmod(Nq,1), kYmod(Nq,1),
-        uT(Nq,1), vT(Nq,1),omegaT(Nq,1){
+        dpdx(Nq,1), dpdy(Nq,1), dpdxm(Nq,1), dpdym(Nq,1), gridX(Nq,1), gridY(Nq,1), kX(Nq,1), kY(Nq,1), kXmod(Nq,1), kYmod(Nq,1),
+        uT(Nq,1), vT(Nq,1),omegaT(Nq,1),dudtT(Nq,1),dvdtT(Nq,1){
         // Compute the grid coordinates and wavenumbers needed for the poisson equation
         computeGridCoordinates();
         writeGridCoordinates();
@@ -120,8 +121,8 @@ public:
     }
 
     void computeGridCoordinates() {
-        // Grid goes from 0 <= x <= 2*pi*Lx-dx, dy <= y <= Ly
-        double y = Ly;
+        // Grid goes from 0 <= x <= 2*pi*Lx-dx, 0 <= y <= Ly-dy
+        double y = Ly-dy;
         for (int j=0;j<Ny;j++) {
             double x = 0.0;
             for (int i=0;i<Nx;i++) {
@@ -144,7 +145,7 @@ public:
     void computeRHSPoisson() {
         computeDivergence();
         for (int i=0;i<Nq;i++) {
-            f[i][0] = div(i);
+            f[i][0] = dt*div(i);
             f[i][1] = 0.0;
         }
     }
@@ -152,6 +153,7 @@ public:
     void computeProjectionStep() {
         solvePoissonEq();
         computePressureDerivatives();
+        interpPressureDerivativeCenterToFace();
         applyFractionalStep();
     }
 
@@ -164,8 +166,8 @@ public:
             p_hat[i][1] = -f_hat[i][1] / (kXmod(i)*kXmod(i) + kYmod(i)*kYmod(i));
         }
         // Set the fourier coefficient at (0,0) to an arbitrary value...it is just the mean
-        p_hat[0][0] = 1.0;
-        p_hat[0][1] = 1.0;
+        p_hat[0][0] = 0.0;
+        p_hat[0][1] = 0.0;
         // Compute the inverse fourier transform of p_hat
         fftw_execute(inverse_plan);
         // Normalize the elements of p by 1/(Nx*Ny)
@@ -177,8 +179,8 @@ public:
 
     void applyFractionalStep() {
         // Function that computes the divergence free velocity field given the pressure gradients
-        u = u - dt * dpdx;
-        v = v - dt * dpdy;
+        u = u - dpdx;
+        v = v - dpdy;
     }
 
     void computeRHS()  {
@@ -204,10 +206,11 @@ public:
     }
 
     void computeVorticity() {
+        interpUVCenter();
         int iX_,iXX,iY_,iYY;
         for (int i=0;i<Nq;i++) {
             getAdjacentIndices(i, iX_,iXX,iY_,iYY);
-            omega(i) = 1/(2*dx) * (v(iXX)-v(iX_)) - 1/(2*dy) * (u(iYY)-u(iY_));
+            omega(i) = 1/(2*dx) * (vm(iXX)-vm(iX_)) - 1/(2*dy) * (um(iYY)-um(iY_));
         }
     }
 
@@ -216,8 +219,8 @@ public:
         int iX_,iXX,iY_,iYY;
         for (int i=0;i<Nq;i++) {
             getAdjacentIndices(i, iX_,iXX,iY_,iYY);
-            dpdx(i) = 1/(2*dx) * (p[iXX][0]-p[iX_][0]);
-            dpdy(i) = 1/(2*dy) * (p[iYY][0]-p[iY_][0]);
+            dpdxm(i) = 1/(2*dx) * (p[iXX][0]-p[iX_][0]);
+            dpdym(i) = 1/(2*dy) * (p[iYY][0]-p[iY_][0]);
         }
     }
 
@@ -283,6 +286,17 @@ public:
         }
     }
 
+    void interpPressureDerivativeCenterToFace() {
+        // Function that linearly interpolates the pressure derivatives from the center to the face
+        // the center
+        int iX_,iXX,iY_,iYY;
+        for (int i=0;i<Nq;i++) {
+            getAdjacentIndices(i, iX_,iXX,iY_,iYY);
+            dpdx(i) = 0.5 * (dpdxm(i) + dpdxm(iX_));
+            dpdy(i) = 0.5 * (dpdym(i) + dpdym(iYY));
+        }
+    }
+
     void interpUVFaceToCorner() {
         // Function that linearly interpolates the grid velocities from the left and bottom face to
         // the lower left corner
@@ -308,17 +322,26 @@ public:
         }
     }
 
-    void setTaylorGreenIC() {
-        double A,a,B,b;
-        A=1.0;a=1.0;B=-1.0;b=1.0;
+    void setTaylorGreenIC(double A, double a, double B, double b) {
         double x,y;
-        for (int i=0;i<Nq;i++) {
-            x = gridX(i);
-            y = gridY(i);
-            double perturbation = 0.0;
-//            if (i%2==0){perturbation = 0.1;}
-            u(i) = A*sin(a*x)*cos(b*y) + perturbation;
-            v(i) = B*cos(a*x)*sin(b*y) - perturbation;
+        std::random_device dev;
+        std::mt19937 rng(dev());
+        std::uniform_real_distribution<double> dist(-0.1,0.1); // distribution in range [-1, 1]
+        int count = 0;
+        for (int j=0;j<Nx;j++) {
+            for (int i=0;i<Ny;i++) {
+                x = gridX(count);
+                y = gridY(count);
+                u(count) = A*sin(a*x)*cos(b*y);
+                v(count) = B*cos(a*x)*sin(b*y);
+                if (i>Nx/2+7 and i < Nx/2+17 and j>Ny/2+7 and j<Ny/2+17) {
+                    u(count) = A*sin(a*x)*cos(b*y) + 1.0;
+                    v(count) = B*cos(a*x)*sin(b*y) + 1.0;
+//                    u(count) = A*sin(a*x)*cos(b*y) + dist(rng);
+//                    v(count) = B*cos(a*x)*sin(b*y) + dist(rng);
+                }
+                count++;
+            }
         }
         computeVorticity();
     }
@@ -332,7 +355,42 @@ public:
         }
     }
 
-    void computeTaylorGreenError(double t) {
+    void setTestStaggeredGridIC() {
+        double x,y;
+        for (int i=0;i<Nq;i++) {
+            x = gridX(i);
+            y = gridY(i);
+            u(i) = cos(x);
+            v(i) = sin(y);
+        }
+    }
+
+    void setTestRandomIC() {
+        std::random_device dev;
+        std::mt19937 rng(dev());
+        std::uniform_real_distribution<double> dist(-1.0,1.0); // distribution in range [-1, 1]
+        double x,y;
+        for (int i=0;i<Nq;i++) {
+            u(i) = dist(rng);
+            v(i) = dist(rng);
+        }
+    }
+
+    void computeStaggeredGridError() {
+        double x,y;
+        double error = 0.0;
+        for (int i=0;i<Nq;i++) {
+            x = gridX(i);
+            y = gridY(i);
+            dudtT(i) = 2*sin(x)*cos(x) - cos(x)*cos(y)   -cos(x)/Re;
+            dvdtT(i) = sin(x)*sin(y)   - 2*cos(y)*sin(y) -sin(y)/Re;
+            error = abs(dudtT(i)-dudt(i)) + abs(dvdtT(i)-dvdt(i));
+        }
+        error/=(2*Nq);
+        std::cout<<"error: "<<error<<std::endl;
+    }
+
+    double computeTaylorGreenError(double t) {
         double x,y;
         double error = 0.0;
         for (int i=0;i<Nq;i++) {
@@ -345,6 +403,7 @@ public:
         }
         error/=(2*Nq);
         std::cout<<"error: "<<error<<std::endl;
+        return error;
     }
 
     void writeUV(const int &iter) {
@@ -377,33 +436,55 @@ public:
 };
 
 int main() {
-    double Re = 100;
+    double Re = 1000;
     double Lx = 2*M_PI;
     double Ly = 2*M_PI;
-    double Nx = 64;
-    double Ny = 64;
-    double T = 2;
-    double Nt = 1000;
+    int Nx = 64;
+    int Ny = 64;
+    double T = 1.0;
+    int Nt = 400;
 
     Simulation sim(Re, Lx, Ly, T, Nx, Ny,Nt);
-//    sim.setTestIC();
-    // Test interpolation functions
-//    sim.interpCrossTermCornerToFace();
 
-    sim.setTaylorGreenIC();
+    // ACTUAL LOOP
+    double A,a,B,b;
+    A=1.0;a=1.0;B=-1.0;b=1.0;
+    sim.setTaylorGreenIC(A,a,B,b);
     sim.writeUV(0);
     sim.computeTaylorGreenError(0.0);
-//
-    double t =sim.dt;
+
+    double t = sim.dt;
+    double globalError = 0.0;
+    double error = 0.0;
     for (int i=1;i<Nt;i++) {
         std::cout<<"iter="<<i<<std::endl;
         sim.advance();
         sim.writeUV(i);
-        sim.computeTaylorGreenError(t);
+        error = sim.computeTaylorGreenError(t);
         t += sim.dt;
+        globalError += error;
     }
-//    return 0;
+    globalError/=Nt;
+    std::cout<<"Global error is: "<<globalError<<std::endl;
+    return 0;
 }
+
+// TESTING STUFF
+// ALL INTERPOLATION FUNCTIONS WORK
+//    sim.setTestIC();
+//    // Test interpolation functions
+//    sim.interpCrossTermCornerToFace();
+
+// STAGGERED GRID DIFFERENTIATION IS ORDER 2 ACCURATE
+//    sim.setTestStaggeredGridIC();
+//    sim.computeRHS();
+//    sim.computeStaggeredGridError();
+
+// FRACTIONAL STEP METHOD WORKS -- IF U IS VERY BIG THEN WE GET NANS, I THINK THE PROBLEM HERE IS IN THE NONDIMENSIONALIZATION AND SUBSEQUENT TIME INTEGRATION
+//    sim.setTestRandomIC();
+//    for (int i=1;i<Nt;i++) {
+//        sim.advance();
+//    }
 
 
 //// Spring mass system RHS function
