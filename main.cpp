@@ -42,7 +42,7 @@ public:
     MatrixXd duvdx, duvdy;
     MatrixXd duvdxC, duvdyC;
     MatrixXd duudx, dvvdy;
-    MatrixXd dpdxm,dpdym,dpdx,dpdy;
+    MatrixXd dpdx,dpdy;
     // Time Derivatives
     MatrixXd dudt,dvdt,dudtT,dvdtT;
     // Grid and Poisson setup
@@ -59,10 +59,11 @@ public:
         Nq(Nxs*Nys), u(Nq,1), v(Nq,1), uq(Nq,1), vq(Nq,1),lapU(Nq,1), lapV(Nq,1),
         duvdx(Nq,1), duvdy(Nq,1), duvdxC(Nq,1), duvdyC(Nq,1), duudx(Nq,1), dvvdy(Nq,1),
         convU(Nq,1), convV(Nq,1), dudt(Nq,1), dvdt(Nq,1), um(Nq,1), vm(Nq,1), div(Nq,1),omega(Nq,1),
-        dpdx(Nq,1), dpdy(Nq,1), dpdxm(Nq,1), dpdym(Nq,1), gridX(Nq,1), gridY(Nq,1), kX(Nq,1), kY(Nq,1), kXmod(Nq,1), kYmod(Nq,1),
+        dpdx(Nq,1), dpdy(Nq,1), gridX(Nq,1), gridY(Nq,1), kX(Nq,1), kY(Nq,1), kXmod(Nq,1), kYmod(Nq,1),
         uT(Nq,1), vT(Nq,1),omegaT(Nq,1),dudtT(Nq,1),dvdtT(Nq,1){
         // Compute the grid coordinates and wavenumbers needed for the poisson equation
         computeGridCoordinates();
+        std::cout<<"compute grid coordinates done"<<std::endl;
         writeGridCoordinates();
         // Don't do in place transforms...requires extra considerations
         f = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * Nq);
@@ -92,6 +93,7 @@ public:
         u = u + 0.5 * k1u;
         v = v + 0.5 * k1v;
         computeProjectionStep();
+        computeDivergence(true);
         // Step 2
         computeRHS();
         k2u = dt * dudt;
@@ -99,6 +101,7 @@ public:
         u = u - 1.5 * k1u + 2 * k2u;
         v = v - 1.5 * k1v + 2 * k2v;
         computeProjectionStep();
+        computeDivergence(true);
         // Step 3
         computeRHS();
         k3u = dt * dudt;
@@ -106,26 +109,67 @@ public:
         u = u + 7.0/6.0 * k1u -  4.0/3.0 * k2u + 1.0/6.0 * k3u;
         v = v + 7.0/6.0 * k1v -  4.0/3.0 * k2v + 1.0/6.0 * k3v;
         computeProjectionStep();
+        computeDivergence(true);
         // Compute the vorticity for visualization
         computeVorticity();
     }
 
     void advanceEuler() {
-        // Step 1
         computeRHS();
         u = u + dt * dudt;
         v = v + dt * dvdt;
-        computeProjectionStep();
-        // Compute the vorticity for visualization
-        computeVorticity();
+        int iX_,iXX,iY_,iYY;
+        double meanDiv = 0.0;
+        for (int i = 0; i < Nq; i++) {
+            getAdjacentIndices(i, iX_, iXX, iY_, iYY);
+            div(i) = 1/dx * (u(iXX) - u(i)) + 1/dy * (v(iY_) - v(i));
+            std::cout<<"div*:("<<div(i)<<")"<<std::endl;
+            meanDiv += abs(div(i));
+        }
+        meanDiv/=Nq;
+        std::cout << "Mean divergence before projection is: " << meanDiv << std::endl;
+        for (int i=0;i<Nq;i++) {
+            f[i][0] = div(i)/dt;
+            f[i][1] = 0.0;
+        }
+        fftw_execute(forward_plan);
+        for (int i=1;i<Nq;i++){
+            p_hat[i][0] = -f_hat[i][0] / (kXmod(i)*kXmod(i) + kYmod(i)*kYmod(i));
+            p_hat[i][1] = -f_hat[i][1] / (kXmod(i)*kXmod(i) + kYmod(i)*kYmod(i));
+        }
+        p_hat[0][0] = 0.0;
+        p_hat[0][1] = 0.0;
+        fftw_execute(inverse_plan);
+        for (int i=0;i<Nq;i++) {
+            p[i][0] = p[i][0]/(Nx*Ny);
+            p[i][1] = p[i][1]/(Nx*Ny);
+        }
+        for (int i=0;i<Nq;i++) {
+            getAdjacentIndices(i, iX_,iXX,iY_,iYY);
+            dpdx(i) = 1/dx * (p[i][0]-p[iX_][0]);
+            dpdy(i) = 1/dy * (p[i][0]-p[iYY][0]);
+        }
+        u = u - dt*dpdx;
+        v = v - dt*dpdy;
+        meanDiv = 0.0;
+        for (int i = 0; i < Nq; i++) {
+            getAdjacentIndices(i, iX_, iXX, iY_, iYY);
+            div(i) = 1/dx * (u(iXX) - u(i)) + 1/dy * (v(iY_) - v(i));
+            std::cout<<"div-proj:("<<div(i)<<")"<<std::endl;
+            meanDiv += abs(div(i));
+        }
+        meanDiv /= Nq;
+        std::cout << "Mean divergence after projection is: " << meanDiv << std::endl;
     }
 
     void computeGridCoordinates() {
+        std::cout<<"compute grid coordinates"<<std::endl;
         // Grid goes from 0 <= x <= 2*pi*Lx-dx, 0 <= y <= Ly-dy
         double y = Ly-dy;
         for (int j=0;j<Ny;j++) {
             double x = 0.0;
             for (int i=0;i<Nx;i++) {
+                std::cout<<"(i,j):"<<i<<","<<j<<std::endl;
                 gridX(i+Nx*j) = x;
                 gridY(i+Nx*j) = y;
                 kX(i+Nx*j) = 2*M_PI/Lx*i;
@@ -145,7 +189,7 @@ public:
     void computeRHSPoisson() {
         computeDivergence();
         for (int i=0;i<Nq;i++) {
-            f[i][0] = dt*div(i);
+            f[i][0] = div(i)/dt;
             f[i][1] = 0.0;
         }
     }
@@ -153,7 +197,6 @@ public:
     void computeProjectionStep() {
         solvePoissonEq();
         computePressureDerivatives();
-        interpPressureDerivativeCenterToFace();
         applyFractionalStep();
     }
 
@@ -166,8 +209,8 @@ public:
             p_hat[i][1] = -f_hat[i][1] / (kXmod(i)*kXmod(i) + kYmod(i)*kYmod(i));
         }
         // Set the fourier coefficient at (0,0) to an arbitrary value...it is just the mean
-        p_hat[0][0] = 0.0;
-        p_hat[0][1] = 0.0;
+        p_hat[0][0] = 1.0;
+        p_hat[0][1] = 1.0;
         // Compute the inverse fourier transform of p_hat
         fftw_execute(inverse_plan);
         // Normalize the elements of p by 1/(Nx*Ny)
@@ -179,8 +222,8 @@ public:
 
     void applyFractionalStep() {
         // Function that computes the divergence free velocity field given the pressure gradients
-        u = u - dpdx;
-        v = v - dpdy;
+        u = u - dt*dpdx;
+        v = v - dt*dpdy;
     }
 
     void computeRHS()  {
@@ -190,27 +233,26 @@ public:
         dvdt = -convV + lapV/Re;
     }
 
-    void computeDivergence() {
-        // Function that computes divergence in cell centers
-        // since this is where the pressure is advanced
-        interpUVCenter();
-        int iX_,iXX,iY_,iYY;
+    void computeDivergence(bool print=false) {
+        // Function that computes divergence in cell centers since this is where the pressure is advanced
+        int iX_, iXX, iY_, iYY;
         double meanDiv = 0.0;
-        for (int i=0;i<Nq;i++) {
-            getAdjacentIndices(i, iX_,iXX,iY_,iYY);
-            div(i) = 1/(2*dx) * (um(iXX)-um(iX_)) + 1/(2*dy) * (vm(iYY)-vm(iY_));
-            meanDiv += div(i);
+        for (int i = 0; i < Nq; i++) {
+            getAdjacentIndices(i, iX_, iXX, iY_, iYY);
+            div(i) = 1/dx * (u(iXX) - u(i)) + 1/dy * (v(iY_) - v(i));
+            meanDiv += abs(div(i));
         }
-        meanDiv/=Nq;
-        std::cout<<"Mean divergence is: "<<meanDiv<<std::endl;
+        meanDiv /= Nq;
+        if (print) { std::cout << "Mean divergence after projection is: " << meanDiv << std::endl; }
     }
 
     void computeVorticity() {
+        // compute the vorticity at the center of the cells
         interpUVCenter();
         int iX_,iXX,iY_,iYY;
         for (int i=0;i<Nq;i++) {
             getAdjacentIndices(i, iX_,iXX,iY_,iYY);
-            omega(i) = 1/(2*dx) * (vm(iXX)-vm(iX_)) - 1/(2*dy) * (um(iYY)-um(iY_));
+            omega(i) = 1/(2*dx) * (vm(iXX)-vm(iX_)) - 1/(2*dy) * (um(iY_)-um(iYY));
         }
     }
 
@@ -219,8 +261,8 @@ public:
         int iX_,iXX,iY_,iYY;
         for (int i=0;i<Nq;i++) {
             getAdjacentIndices(i, iX_,iXX,iY_,iYY);
-            dpdxm(i) = 1/(2*dx) * (p[iXX][0]-p[iX_][0]);
-            dpdym(i) = 1/(2*dy) * (p[iYY][0]-p[iY_][0]);
+            dpdx(i) = 1/dx * (p[i][0]-p[iX_][0]);
+            dpdy(i) = 1/dy * (p[i][0]-p[iYY][0]);
         }
     }
 
@@ -249,17 +291,18 @@ public:
         for (int i=0;i<Nq;i++) {
             getAdjacentIndices(i, iX_,iXX,iY_,iYY);
             duudx(i) = 1/(2*dx) * (u(iXX)*u(iXX)-u(iX_)*u(iX_));
-            dvvdy(i) = 1/(2*dy) * (v(iYY)*v(iYY)-v(iY_)*v(iY_));
+            dvvdy(i) = 1/(2*dy) * (v(iY_)*v(iY_)-v(iYY)*v(iYY));
         }
     }
 
+    // this might be non-optimal
     void computeCrossTermAtCorners() {
         // Function that computes duvdx and duvdy on grid corners
         int iX_,iXX,iY_,iYY;
         for (int i=0;i<Nq;i++) {
             getAdjacentIndices(i, iX_,iXX,iY_,iYY);
             duvdxC(i) = 1/(2*dx) * (uq(iXX)*vq(iXX)-uq(iX_)*vq(iX_));
-            duvdyC(i) = 1/(2*dy) * (uq(iYY)*vq(iYY)-uq(iY_)*vq(iY_));
+            duvdyC(i) = 1/(2*dy) * (uq(iY_)*vq(iY_)-uq(iYY)*vq(iYY));
         }
     }
 
@@ -286,14 +329,13 @@ public:
         }
     }
 
-    void interpPressureDerivativeCenterToFace() {
+    void interpUVCenterToFace() {
         // Function that linearly interpolates the pressure derivatives from the center to the face
-        // the center
         int iX_,iXX,iY_,iYY;
         for (int i=0;i<Nq;i++) {
             getAdjacentIndices(i, iX_,iXX,iY_,iYY);
-            dpdx(i) = 0.5 * (dpdxm(i) + dpdxm(iX_));
-            dpdy(i) = 0.5 * (dpdym(i) + dpdym(iYY));
+            u(i) = 0.5 * (um(i) + um(iX_));
+            v(i) = 0.5 * (vm(i) + vm(iYY));
         }
     }
 
@@ -335,8 +377,8 @@ public:
                 u(count) = A*sin(a*x)*cos(b*y);
                 v(count) = B*cos(a*x)*sin(b*y);
                 if (i>Nx/2+7 and i < Nx/2+17 and j>Ny/2+7 and j<Ny/2+17) {
-                    u(count) = A*sin(a*x)*cos(b*y) + 1.0;
-                    v(count) = B*cos(a*x)*sin(b*y) + 1.0;
+                    u(count) = A*sin(a*x)*cos(b*y) + 0.1;
+                    v(count) = B*cos(a*x)*sin(b*y) + 0.1;
 //                    u(count) = A*sin(a*x)*cos(b*y) + dist(rng);
 //                    v(count) = B*cos(a*x)*sin(b*y) + dist(rng);
                 }
@@ -350,8 +392,17 @@ public:
         for (int i=0;i<Nq;i++) {
             u(i) = i+1;
             v(i) = i+1;
-            duvdxC(i) = i+1;
-            duvdyC(i) = i+1;
+//            duvdxC(i) = i+1;
+//            duvdyC(i) = i+1;
+            std::cout<<"IC:("<<u(i)<<","<<v(i)<<")"<<std::endl;
+        }
+    }
+
+    void setTestIC2() {
+        for (int i=0;i<Nq;i++) {
+            u(i) = 1;
+            v(i) = 1;
+            std::cout<<"IC:("<<u(i)<<","<<v(i)<<")"<<std::endl;
         }
     }
 
@@ -360,12 +411,12 @@ public:
         for (int i=0;i<Nq;i++) {
             x = gridX(i);
             y = gridY(i);
-            u(i) = cos(x);
+            u(i) = cos(x); //e^-x + c
             v(i) = sin(y);
         }
     }
 
-    void setTestRandomIC() {
+    void setRandomIC() {
         std::random_device dev;
         std::mt19937 rng(dev());
         std::uniform_real_distribution<double> dist(-1.0,1.0); // distribution in range [-1, 1]
@@ -408,14 +459,16 @@ public:
 
     void writeUV(const int &iter) {
         // Writes the solution u,v to a CSV file
-        ofstream fu,fv,fomega;
+        ofstream fu,fv,fomega,fp;
         fu.open("u_" + std::to_string(iter) + ".csv");
         fv.open("v_" + std::to_string(iter) + ".csv");
         fomega.open("omega_" + std::to_string(iter) + ".csv");
+        fp.open("p_" + std::to_string(iter) + ".csv");
         for (int i=0;i<Nq;i++){
             fu << u(i) <<",";
             fv << v(i)<<",";
             fomega << omega(i)<<",";
+            fp << p[i][0]<<",";
         }
         fu.close();
         fv.close();
@@ -439,16 +492,16 @@ int main() {
     double Re = 1000;
     double Lx = 2*M_PI;
     double Ly = 2*M_PI;
-    int Nx = 64;
-    int Ny = 64;
-    double T = 1.0;
-    int Nt = 400;
+    int Nx = 256;
+    int Ny = 256;
+    double T = 100;
+    int Nt = 4000;
 
     Simulation sim(Re, Lx, Ly, T, Nx, Ny,Nt);
 
-    // ACTUAL LOOP
     double A,a,B,b;
     A=1.0;a=1.0;B=-1.0;b=1.0;
+//    sim.setRandomIC();
     sim.setTaylorGreenIC(A,a,B,b);
     sim.writeUV(0);
     sim.computeTaylorGreenError(0.0);
