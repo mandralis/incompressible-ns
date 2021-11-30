@@ -2,29 +2,42 @@ import numpy as np
 import matplotlib.pyplot as plt
 from IPython import embed
 
-Nx,Ny = 64,64
-Nt = 1000
+Nx,Ny = 256,256
+Nt = 4000
 grid = np.genfromtxt('grid.csv', delimiter=',')
-gridX = np.reshape(np.copy(grid[:,0]),(Nx,Ny))
-gridY = np.reshape(np.copy(grid[:,1]),(Nx,Ny))
-for i in range(Nt)[::10]:
+gridX = np.transpose(np.reshape(np.copy(grid[:,0]),(Nx,Ny)))
+gridY = np.transpose(np.reshape(np.copy(grid[:,1]),(Nx,Ny)))
+for i in range(Nt):
+    print("iter:{}".format(i))
     u = np.genfromtxt('u_{}.csv'.format(i), delimiter=',')
-    v = np.genfromtxt('v_{}.csv'.format(i), delimiter=',')
+    # v = np.genfromtxt('v_{}.csv'.format(i), delimiter=',')
     omega = np.genfromtxt('omega_{}.csv'.format(i), delimiter=',')
-    u,v,omega = u[:-1],v[:-1],omega[:-1]
+    # p = np.genfromtxt('p_{}.csv'.format(i), delimiter=',')
+    # u,v,omega = u[:-1],v[:-1],omega[:-1]
+    omega = omega[:-1]
+    u = u[:-1]
     uMat = np.zeros((Nx,Ny))
-    vMat = np.zeros((Nx,Ny))
+    # vMat = np.zeros((Nx,Ny))
     omegaMat = np.zeros((Nx,Ny))
+    # pMat = np.zeros((Nx,Ny))
     count = 0
     for j in range(Ny):
-        for i in range(Nx):
-            uMat[i,j] = u[count]
-            vMat[i,j] = v[count]
-            omegaMat[i,j] = omega[count]
+        for ii in range(Nx):
+            uMat[ii,j] = u[count]
+            # vMat[ii,j] = v[count]
+            omegaMat[ii,j] = omega[count]
+            # pMat[ii,j] = p[count]
             count+=1
-    plt.pcolormesh(gridX,gridY,omegaMat,cmap='bwr',vmin=-1,vmax=1)
-    # plt.show()
-    plt.show(block=False)
-    plt.colorbar()
-    plt.colorbar().remove()
-    plt.pause(0.01)
+    
+    plt.pcolormesh(gridX,gridY,omegaMat,cmap='RdBu')
+    # plt.quiver(gridX,gridY,uMat,vMat)
+    # plt.pcolormesh(gridX,gridY,np.sqrt(uMat*uMat + vMat*vMat),cmap='viridis',vmin=0,vmax=1)
+    plt.xlim([0,2*np.pi])
+    plt.ylim([0,2*np.pi])
+    # plt.show(block=False)
+    plt.axis('square')
+    plt.savefig('omega_{}.png'.format(i))
+    plt.close()
+    # plt.colorbar()
+    # plt.colorbar().remove()
+    # plt.pause(0.01)

@@ -20,13 +20,15 @@ class Simulation {
 public:
     // Physics
     double Re;
+    // Nondimensionalization
+    double length_scale, velocity_scale, time_scale;
     // Spatial discretization
     double Lx,Ly;
-    int Nx,Ny;
-    int Nxs,Nys,Nq;
+    double extentX,extentY;
+    int Nx,Ny,Nq;
     double dx,dy;
     // Temporal discretization
-    double T,dt;
+    double T, dt;
     int Nt;
     // Velocity field and pressure field in row major order on staggered grid
     MatrixXd u,v,uT,vT;
@@ -40,13 +42,12 @@ public:
     MatrixXd lapU, lapV;
     MatrixXd convU, convV;
     MatrixXd duvdx, duvdy;
-    MatrixXd duvdxC, duvdyC;
     MatrixXd duudx, dvvdy;
     MatrixXd dpdx,dpdy;
     // Time Derivatives
     MatrixXd dudt,dvdt,dudtT,dvdtT;
     // Grid and Poisson setup
-    Eigen::MatrixXd gridX,gridY;
+    Eigen::MatrixXd gridX,gridY,gridXU,gridYU, gridXV, gridYV;
     Eigen::MatrixXd kX,kY;
     Eigen::MatrixXd kXmod,kYmod;
     // FFTW setup
@@ -54,22 +55,52 @@ public:
     fftw_plan forward_plan, inverse_plan;
 
     // Constructor
-    Simulation(double Re_, double Lx_, double Ly_, double T_, int Nx_, int Ny_, int Nt_)
-      : Re(Re_), Lx(Lx_),Ly(Ly_),T(T_), Nx(Nx_),Ny(Ny_),Nt(Nt_),dx(Lx_/Nx_),dy(Ly_/Ny_),dt(T_/Nt_),Nxs(Nx_),Nys(Ny_),
-        Nq(Nxs*Nys), u(Nq,1), v(Nq,1), uq(Nq,1), vq(Nq,1),lapU(Nq,1), lapV(Nq,1),
-        duvdx(Nq,1), duvdy(Nq,1), duvdxC(Nq,1), duvdyC(Nq,1), duudx(Nq,1), dvvdy(Nq,1),
+    Simulation(double Re_, double U0_, double Lx_, double Ly_, int Nx_, int Ny_, int Nt_, double T_)
+      : Re(Re_), Lx(Lx_),Ly(Ly_), Nx(Nx_),Ny(Ny_),Nt(Nt_),Nq(Nx_*Ny_),T(T_),
+        u(Nq,1), v(Nq,1), uq(Nq,1), vq(Nq,1),lapU(Nq,1), lapV(Nq,1),
+        duvdx(Nq,1), duvdy(Nq,1), duudx(Nq,1), dvvdy(Nq,1),
         convU(Nq,1), convV(Nq,1), dudt(Nq,1), dvdt(Nq,1), um(Nq,1), vm(Nq,1), div(Nq,1),omega(Nq,1),
         dpdx(Nq,1), dpdy(Nq,1), gridX(Nq,1), gridY(Nq,1), kX(Nq,1), kY(Nq,1), kXmod(Nq,1), kYmod(Nq,1),
-        uT(Nq,1), vT(Nq,1),omegaT(Nq,1),dudtT(Nq,1),dvdtT(Nq,1){
+        uT(Nq,1), vT(Nq,1),omegaT(Nq,1),dudtT(Nq,1),dvdtT(Nq,1),
+        gridXU(Nq,1),gridYU(Nq,1), gridXV(Nq,1), gridYV(Nq,1) {
+
+        // Define the non-dimensionalization scales
+        length_scale = Lx;
+        velocity_scale = U0_;
+        time_scale = Lx/U0_;
+
+        // Define the extent of the simulation domain
+        extentX = (2*M_PI*Lx)/length_scale;
+        extentY = (2*M_PI*Ly)/length_scale;
+
+        // Compute the non-dimensionalized dx,dy,dt
+        dx = (2*M_PI*Lx/Nx)/length_scale;
+        dy = (2*M_PI*Ly/Ny)/length_scale;
+        dt = (T/Nt)/time_scale;
+
+        // Print information for the user
+        std::cout<<"**************2D Navier Stokes sim **************" <<std::endl;
+        std::cout<<"**************Simulation parameters**************" <<std::endl;
+        std::cout<<"Re:"<<Re<<std::endl;
+        std::cout<<"lengthscale:"<<length_scale<<std::endl;
+        std::cout<<"velocityscale:"<<velocity_scale<<std::endl;
+        std::cout<<"timescale:"<<time_scale<<std::endl;
+        std::cout<<"dx:"<<dx<<std::endl;
+        std::cout<<"dy:"<<dy<<std::endl;
+        std::cout<<"dt:"<<dt<<std::endl;
+        std::cout<<"**************Beginning simulation**************" <<std::endl;
+
         // Compute the grid coordinates and wavenumbers needed for the poisson equation
         computeGridCoordinates();
-        std::cout<<"compute grid coordinates done"<<std::endl;
         writeGridCoordinates();
-        // Don't do in place transforms...requires extra considerations
+
+        // Allocate the memory required for fourier transforms
         f = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * Nq);
         f_hat = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * Nq);
         p = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * Nq);
         p_hat = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * Nq);
+
+        // Pre-define the fourier transforms using FFTW_MEASURE to maximize speed.
         forward_plan = fftw_plan_dft_2d(Nx, Ny, f, f_hat, FFTW_FORWARD, FFTW_MEASURE);
         inverse_plan = fftw_plan_dft_2d(Nx, Ny, p_hat, p, FFTW_BACKWARD, FFTW_MEASURE);
     }
@@ -79,6 +110,40 @@ public:
         fftw_cleanup();
     }
 
+    // Grid methods
+    void computeGridCoordinates() {
+        // Grid goes from 0 <= x <= 2*pi-dx, 0 <= y <= 2*pi-dy
+        // (gridX, gridY) are the lower left corners of each element of the grid
+        // (gridXU,gridYU), (gridXV,gridYV) are the left face and bottom face of each element of the grid, respectively
+        double Px = extentX;
+        double Py = extentY;
+
+        double y = extentY-dy;
+        for (int j=0;j<Ny;j++) {
+            double x = 0.0;
+            for (int i=0;i<Nx;i++) {
+                gridX(i+Nx*j) = x;
+                gridY(i+Nx*j) = y;
+                kX(i+Nx*j) = 2*M_PI/Px*i;
+                kY(i+Nx*j) = 2*M_PI/Py*j;
+                if(i>Nx/2){kX(i+Nx*j)=-(Nx-i)*2*M_PI/Px;}
+                if(j>Ny/2){kY(i+Nx*j)=-(Ny-j)*2*M_PI/Py;}
+                x+=dx;
+                // Compute the modified wavenumbers
+                kXmod(i+Nx*j) = 2/dx*sin(kX(i+Nx*j)*dx/2)*sgn(kX(i+Nx*j));
+                kYmod(i+Nx*j) = 2/dy*sin(kY(i+Nx*j)*dy/2)*sgn(kY(i+Nx*j));
+                // Write the staggered grids for easy imposition of initial conditions by the user
+                gridXU(i+Nx*j) = x;
+                gridYU(i+Nx*j) = y + dy/2;
+                gridXV(i+Nx*j) = x + dx/2;
+                gridYV(i+Nx*j) = y;
+//                std::cout << "("<<gridX(i+Nx*j)<<","<<gridY(i+Nx*j)<<")"<<std::endl;
+            }
+            y-=dy;
+        }
+    }
+
+    // Simulation methods
     void advance() {
         VectorXd k1u(Nq,1);
         VectorXd k2u(Nq,1);
@@ -114,76 +179,11 @@ public:
         computeVorticity();
     }
 
-    void advanceEuler() {
-        computeRHS();
-        u = u + dt * dudt;
-        v = v + dt * dvdt;
-        int iX_,iXX,iY_,iYY;
-        double meanDiv = 0.0;
-        for (int i = 0; i < Nq; i++) {
-            getAdjacentIndices(i, iX_, iXX, iY_, iYY);
-            div(i) = 1/dx * (u(iXX) - u(i)) + 1/dy * (v(iY_) - v(i));
-            std::cout<<"div*:("<<div(i)<<")"<<std::endl;
-            meanDiv += abs(div(i));
-        }
-        meanDiv/=Nq;
-        std::cout << "Mean divergence before projection is: " << meanDiv << std::endl;
-        for (int i=0;i<Nq;i++) {
-            f[i][0] = div(i)/dt;
-            f[i][1] = 0.0;
-        }
-        fftw_execute(forward_plan);
-        for (int i=1;i<Nq;i++){
-            p_hat[i][0] = -f_hat[i][0] / (kXmod(i)*kXmod(i) + kYmod(i)*kYmod(i));
-            p_hat[i][1] = -f_hat[i][1] / (kXmod(i)*kXmod(i) + kYmod(i)*kYmod(i));
-        }
-        p_hat[0][0] = 0.0;
-        p_hat[0][1] = 0.0;
-        fftw_execute(inverse_plan);
-        for (int i=0;i<Nq;i++) {
-            p[i][0] = p[i][0]/(Nx*Ny);
-            p[i][1] = p[i][1]/(Nx*Ny);
-        }
-        for (int i=0;i<Nq;i++) {
-            getAdjacentIndices(i, iX_,iXX,iY_,iYY);
-            dpdx(i) = 1/dx * (p[i][0]-p[iX_][0]);
-            dpdy(i) = 1/dy * (p[i][0]-p[iYY][0]);
-        }
-        u = u - dt*dpdx;
-        v = v - dt*dpdy;
-        meanDiv = 0.0;
-        for (int i = 0; i < Nq; i++) {
-            getAdjacentIndices(i, iX_, iXX, iY_, iYY);
-            div(i) = 1/dx * (u(iXX) - u(i)) + 1/dy * (v(iY_) - v(i));
-            std::cout<<"div-proj:("<<div(i)<<")"<<std::endl;
-            meanDiv += abs(div(i));
-        }
-        meanDiv /= Nq;
-        std::cout << "Mean divergence after projection is: " << meanDiv << std::endl;
-    }
-
-    void computeGridCoordinates() {
-        std::cout<<"compute grid coordinates"<<std::endl;
-        // Grid goes from 0 <= x <= 2*pi*Lx-dx, 0 <= y <= Ly-dy
-        double y = Ly-dy;
-        for (int j=0;j<Ny;j++) {
-            double x = 0.0;
-            for (int i=0;i<Nx;i++) {
-                std::cout<<"(i,j):"<<i<<","<<j<<std::endl;
-                gridX(i+Nx*j) = x;
-                gridY(i+Nx*j) = y;
-                kX(i+Nx*j) = 2*M_PI/Lx*i;
-                kY(i+Nx*j) = 2*M_PI/Ly*j;
-                if(i>Nx/2){kX(i+Nx*j)=-(Nx-i)*2*M_PI/Lx;}
-                if(j>Ny/2){kY(i+Nx*j)=-(Ny-j)*2*M_PI/Ly;}
-                x+=dx;
-                // Compute the modified wavenumbers
-                kXmod(i+Nx*j) = 2/dx*sin(kX(i+Nx*j)*dx/2)*sgn(kX(i+Nx*j));
-                kYmod(i+Nx*j) = 2/dy*sin(kY(i+Nx*j)*dy/2)*sgn(kY(i+Nx*j));
-//                std::cout << "("<<gridX(i+Nx*j)<<","<<gridY(i+Nx*j)<<")"<<std::endl;
-            }
-            y-=dy;
-        }
+    void computeRHS()  {
+        computeLaplacian();
+        computeConvectiveTerm();
+        dudt = -convU + lapU/Re;
+        dvdt = -convV + lapV/Re;
     }
 
     void computeRHSPoisson() {
@@ -226,13 +226,6 @@ public:
         v = v - dt*dpdy;
     }
 
-    void computeRHS()  {
-        computeLaplacian();
-        computeConvectiveTerm();
-        dudt = -convU + lapU/Re;
-        dvdt = -convV + lapV/Re;
-    }
-
     void computeDivergence(bool print=false) {
         // Function that computes divergence in cell centers since this is where the pressure is advanced
         int iX_, iXX, iY_, iYY;
@@ -271,15 +264,14 @@ public:
         int iX_,iXX,iY_,iYY;
         for (int i=0;i<Nq;i++) {
             getAdjacentIndices(i, iX_,iXX,iY_,iYY);
-            lapU(i) = 1/(dx*dx) * (u(iXX)-2*u(i)+u(iX_)) +  1/(dy*dy) * (u(iYY)-2*u(i)+u(iY_));
-            lapV(i) = 1/(dx*dx) * (v(iXX)-2*v(i)+v(iX_)) +  1/(dy*dy) * (v(iYY)-2*v(i)+v(iY_));
+            lapU(i) = 1/(dx*dx) * (u(iXX)-2*u(i)+u(iX_)) +  1/(dy*dy) * (u(iY_)-2*u(i)+u(iYY));
+            lapV(i) = 1/(dx*dx) * (v(iXX)-2*v(i)+v(iX_)) +  1/(dy*dy) * (v(iY_)-2*v(i)+v(iYY));
         }
     }
 
     void computeConvectiveTerm() {
         interpUVFaceToCorner();
-        computeCrossTermAtCorners();
-        interpCrossTermCornerToFace();
+        computeCrossTerm();
         computeSquareTerm();
         convU = duudx + duvdy;
         convV = duvdx + dvvdy;
@@ -295,29 +287,17 @@ public:
         }
     }
 
-    // this might be non-optimal
-    void computeCrossTermAtCorners() {
-        // Function that computes duvdx and duvdy on grid corners
+    void computeCrossTerm() {
+        // Function that computes duvdx and duvdy on grid faces
         int iX_,iXX,iY_,iYY;
         for (int i=0;i<Nq;i++) {
             getAdjacentIndices(i, iX_,iXX,iY_,iYY);
-            duvdxC(i) = 1/(2*dx) * (uq(iXX)*vq(iXX)-uq(iX_)*vq(iX_));
-            duvdyC(i) = 1/(2*dy) * (uq(iY_)*vq(iY_)-uq(iYY)*vq(iYY));
+            duvdy(i) = 1/dy * (uq(iY_)*vq(iY_)-uq(i)*vq(i));
+            duvdx(i) = 1/dx * (uq(iXX)*vq(iXX)-uq(i)*vq(i));
         }
     }
 
-    // Convenience methods
-    void getAdjacentIndices(const int &i, int &iX_,int &iXX,int &iY_,int &iYY) {
-        iX_ = i-1;
-        iXX = i+1;
-        if(i%Nxs==0){iX_=iX_+Nxs;}
-        if((i+1)%Nxs==0) {iXX=iXX-Nxs;}
-        iY_ = i-Nxs;
-        iYY = i+Nxs;
-        if(iY_<0) {iY_=iY_+Nq;}
-        if(iYY>Nq-1) {iYY=iYY-Nq;}
-    }
-
+    // Interpolation methods
     void interpUVCenter() {
         // Function that linearly interpolates the grid velocities from the left and bottom face to
         // the center
@@ -326,16 +306,6 @@ public:
             getAdjacentIndices(i, iX_,iXX,iY_,iYY);
             um(i) = 0.5 * (u(i) + u(iXX));
             vm(i) = 0.5 * (v(i) + v(iY_));
-        }
-    }
-
-    void interpUVCenterToFace() {
-        // Function that linearly interpolates the pressure derivatives from the center to the face
-        int iX_,iXX,iY_,iYY;
-        for (int i=0;i<Nq;i++) {
-            getAdjacentIndices(i, iX_,iXX,iY_,iYY);
-            u(i) = 0.5 * (um(i) + um(iX_));
-            v(i) = 0.5 * (vm(i) + vm(iYY));
         }
     }
 
@@ -350,69 +320,133 @@ public:
         }
     }
 
-    void interpCrossTermCornerToFace() {
-        // Function that linearly interpolates the cross derivative from the lower left corner to the left
-        // and bottom face
-        // duvdy should be on the left face
-        // duvdx should be on the bottom face
-        int iX_,iXX,iY_,iYY;
-        for (int i=0;i<Nq;i++) {
-            getAdjacentIndices(i, iX_,iXX,iY_,iYY);
-            duvdx(i) = 0.5*(duvdxC(i) + duvdxC(iXX));
-            duvdy(i) = 0.5*(duvdyC(i) + duvdyC(iY_));
-//            std::cout<<"("<<duvdx(i)<<","<<duvdy(i)<<")"<<std::endl;
-        }
+    // Periodic boundary conditions methods
+    void getAdjacentIndices(const int &i, int &iX_,int &iXX,int &iY_,int &iYY) {
+        iX_ = i-1;
+        iXX = i+1;
+        if(i%Nx==0){iX_=iX_+Nx;}
+        if((i+1)%Nx==0) {iXX=iXX-Nx;}
+        iY_ = i-Nx;
+        iYY = i+Nx;
+        if(iY_<0) {iY_=iY_+Nq;}
+        if(iYY>Nq-1) {iYY=iYY-Nq;}
     }
 
+    // Initial conditions
     void setTaylorGreenIC(double A, double a, double B, double b) {
-        double x,y;
         std::random_device dev;
         std::mt19937 rng(dev());
         std::uniform_real_distribution<double> dist(-0.1,0.1); // distribution in range [-1, 1]
         int count = 0;
+        double xU,yU,xV,yV;
         for (int j=0;j<Nx;j++) {
             for (int i=0;i<Ny;i++) {
-                x = gridX(count);
-                y = gridY(count);
-                u(count) = A*sin(a*x)*cos(b*y);
-                v(count) = B*cos(a*x)*sin(b*y);
-                if (i>Nx/2+7 and i < Nx/2+17 and j>Ny/2+7 and j<Ny/2+17) {
-                    u(count) = A*sin(a*x)*cos(b*y) + 0.1;
-                    v(count) = B*cos(a*x)*sin(b*y) + 0.1;
-//                    u(count) = A*sin(a*x)*cos(b*y) + dist(rng);
-//                    v(count) = B*cos(a*x)*sin(b*y) + dist(rng);
-                }
+                xU = gridXU(count);
+                yU = gridYU(count);
+                xV = gridXV(count);
+                yV = gridYV(count);
+                u(count) = A*sin(a*xU)*cos(b*yU);
+                v(count) = B*cos(a*xV)*sin(b*yV);
+//                if (i>Nx/2+7 and i < Nx/2+17 and j>Ny/2+7 and j<Ny/2+17) {
+//                    u(count) = A*sin(a*xU)*cos(b*yU) + 0.1*abs(A);
+//                    v(count) = B*cos(a*xV)*sin(b*yV) + 0.1*abs(B);
+//                }
+                // Non-dimensionalize the velocity !
+                u(count)/=velocity_scale;
+                v(count)/=velocity_scale;
                 count++;
             }
         }
         computeVorticity();
     }
 
-    void setTestIC() {
-        for (int i=0;i<Nq;i++) {
-            u(i) = i+1;
-            v(i) = i+1;
-//            duvdxC(i) = i+1;
-//            duvdyC(i) = i+1;
-            std::cout<<"IC:("<<u(i)<<","<<v(i)<<")"<<std::endl;
+    void setVorticityIC() {
+        // Random number generator
+        std::random_device dev;
+        std::mt19937 rng(dev());
+        std::uniform_real_distribution<double> angle(0.0,2*M_PI); // uniform distribution in range [0, 2pi]
+
+        // FFTW setup
+        fftw_complex *omega_hat, *psi, *psi_hat;
+        fftw_plan inverse_plan_psi;
+        omega_hat = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * Nq);
+        psi = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * Nq);
+        psi_hat = (fftw_complex*)   fftw_malloc(sizeof(fftw_complex) * Nq);
+        inverse_plan_psi = fftw_plan_dft_2d(Nx, Ny, psi_hat, psi, FFTW_BACKWARD, FFTW_ESTIMATE);
+
+        // Initialize the fourier coefficients of vorticity with equal magnitude 1 but arbitrary phases.
+        // Excite all wavenumbers, change this later
+        double M = 1000.0;
+        for (int i=0;i<Nq;i++){
+            omega_hat[i][0] = M*cos(angle(rng));
+            omega_hat[i][1] = M*sin(angle(rng));
         }
+        // Compute psi_hat
+        for (int i=1;i<Nq;i++){
+            psi_hat[i][0] = omega_hat[i][0] / (kX(i)*kX(i) + kY(i)*kY(i));
+            psi_hat[i][1] = omega_hat[i][1] / (kX(i)*kX(i) + kY(i)*kY(i));
+        }
+        // Set the fourier coefficient at (0,0) to an arbitrary value...it is just the mean
+        psi_hat[0][0] = 0.0;
+        psi_hat[0][1] = 0.0;
+        // Compute the inverse fourier transform of psi_hat
+        fftw_execute(inverse_plan_psi);
+        // Normalize the elements of psi by 1/(Nx*Ny)
+        for (int i=0;i<Nq;i++) {
+            psi[i][0] = psi[i][0]/(Nx*Ny);
+            psi[i][1] = psi[i][1]/(Nx*Ny);
+        }
+        // Finally the velocity field is computed by finite differencing the stream function psi
+        int iX_,iXX,iY_,iYY;
+        for (int i=0;i<Nq;i++) {
+            getAdjacentIndices(i, iX_,iXX,iY_,iYY);
+            u(i) = 1/dy * (psi[i][0]-psi[iYY][0]);
+            v(i) = -1/dx * (psi[i][0]-psi[iX_][0]);
+            // Non dimensionalize !
+            u(i) /= velocity_scale;
+            v(i) /= velocity_scale;
+        }
+        computeVorticity();
     }
 
-    void setTestIC2() {
-        for (int i=0;i<Nq;i++) {
-            u(i) = 1;
-            v(i) = 1;
-            std::cout<<"IC:("<<u(i)<<","<<v(i)<<")"<<std::endl;
+    void setMixingLayerIC(double fraction_still) {
+        std::random_device dev;
+        std::mt19937 rng(dev());
+        std::uniform_real_distribution<double> dist(-0.03,0.03); // distribution in range [-1, 1]
+        int count = 0;
+        double x,y;
+        for (int j=0;j<Nx;j++) {
+            for (int i=0;i<Ny;i++) {
+                x = gridX(count);
+                y = gridY(count);
+                if(y>extentY/2.0 + extentY*fraction_still/2) {
+                    u(count) = 2*(extentY-y)/extentY + dist(rng);
+                    v(count) = 0.0;
+                } else if (y<=extentY/2.0 - extentY*fraction_still/2) {
+                    u(count) = -2*y/extentY + dist(rng);
+                    v(count) = 0.0;
+                } else {
+                    u(count) = 0.0;
+                    v(count) = 1.0;
+                }
+                // Non-dimensionalize the velocity !
+                u(count)/=velocity_scale;
+                v(count)/=velocity_scale;
+                count++;
+            }
         }
+        computeVorticity();
     }
 
     void setTestStaggeredGridIC() {
-        double x,y;
+        double xU,yU,xV,yV;
         for (int i=0;i<Nq;i++) {
-            x = gridX(i);
-            y = gridY(i);
-            u(i) = cos(x); //e^-x + c
-            v(i) = sin(y);
+            xU = gridXU(i);
+            yU = gridYU(i);
+            xV = gridXV(i);
+            yV = gridYV(i);
+            u(i) = cos(xU);
+            v(i) = sin(yV);
         }
     }
 
@@ -427,36 +461,44 @@ public:
         }
     }
 
+    // Testing methods
     void computeStaggeredGridError() {
-        double x,y;
+        double xU,yU,xV,yV;
         double error = 0.0;
         for (int i=0;i<Nq;i++) {
-            x = gridX(i);
-            y = gridY(i);
-            dudtT(i) = 2*sin(x)*cos(x) - cos(x)*cos(y)   -cos(x)/Re;
-            dvdtT(i) = sin(x)*sin(y)   - 2*cos(y)*sin(y) -sin(y)/Re;
-            error = abs(dudtT(i)-dudt(i)) + abs(dvdtT(i)-dvdt(i));
+            xU = gridXU(i);
+            yU = gridYU(i);
+            xV = gridXV(i);
+            yV = gridYV(i);
+            dudtT(i) = 2*sin(xU)*cos(xU) - cos(xU)*cos(yU)   -cos(xU)/Re;
+            dvdtT(i) = sin(xV)*sin(yV)   - 2*cos(yV)*sin(yV) -sin(yV)/Re;
+            error += abs(dudtT(i)-dudt(i)) + abs(dvdtT(i)-dvdt(i));
         }
-        error/=(2*Nq);
+        error/=Nq;
         std::cout<<"error: "<<error<<std::endl;
     }
 
     double computeTaylorGreenError(double t) {
-        double x,y;
+        double x,y,xU,yU,xV,yV;
         double error = 0.0;
         for (int i=0;i<Nq;i++) {
             x = gridX(i);
             y = gridY(i);
-            uT(i) = sin(x)*cos(y)*exp(-2*t/Re);
-            vT(i) = -cos(x)*sin(y)*exp(-2*t/Re);
-            omegaT(i) = 2*sin(x)*sin(y)*exp(-2*t/Re);
-            error = abs(uT(i)-u(i)) + abs(vT(i)-v(i));
+            xU = gridXU(i);
+            yU = gridYU(i);
+            xV = gridXV(i);
+            yV = gridYV(i);
+            uT(i) = sin(xU)*cos(yU)*exp(-2*t/Re);
+            vT(i) = -cos(xV)*sin(yV)*exp(-2*t/Re);
+            omegaT(i) = 2*sin(x+dx)*sin(y+dy)*exp(-2*t/Re);
+            error += abs(uT(i)-u(i)) + abs(vT(i)-v(i));
         }
-        error/=(2*Nq);
+        error/=Nq;
         std::cout<<"error: "<<error<<std::endl;
         return error;
     }
 
+    // IO methods
     void writeUV(const int &iter) {
         // Writes the solution u,v to a CSV file
         ofstream fu,fv,fomega,fp;
@@ -477,34 +519,52 @@ public:
 
     void writeGridCoordinates() {
         // Writes the gridCoordinates
-        ofstream fu;
-        ofstream fv;
-        ofstream fgrid;
+        ofstream fgrid,fgridU,fgridV;
         fgrid.open("grid.csv");
+        fgridU.open("grid.csv");
+        fgridV.open("grid.csv");
         for (int i=0;i<Nq;i++){
             fgrid << gridX(i)<<","<<gridY(i)<<std::endl;
+            fgridU << gridXU(i)<<","<<gridYU(i)<<std::endl;
+            fgridV << gridXV(i)<<","<<gridYV(i)<<std::endl;
         }
         fgrid.close();
     }
 };
 
 int main() {
-    double Re = 1000;
-    double Lx = 2*M_PI;
-    double Ly = 2*M_PI;
-    int Nx = 256;
-    int Ny = 256;
-    double T = 100;
-    int Nt = 4000;
+    // There are two free parameters (Re,Lx)
+    // Set the viscosity to 1.0 -->
+    // Calculate the reference velocity in the simulation class (U0=Re/Lx)
 
-    Simulation sim(Re, Lx, Ly, T, Nx, Ny,Nt);
+    // Choose U0 to be the maximum of the initial condition - detect this in the class constructor
+    // Once U0 is found, since Lx and Re will be set by the user, adapt the viscosity to match this
+
+    // Non-dimensionalization
+    double Re = 10000;
+    double U0 = 1.0;
+    double Lx = 1.0;
+
+    // Grid
+    int Nx = 512;
+
+    // Time
+    double T = 0.01;
+    int Nt = 10;
+
+    // Square, uniform grid
+    double Ly = Lx;
+    int Ny = Nx;
+
+    Simulation sim(Re, U0, Lx, Ly, Nx, Ny, Nt, T);
 
     double A,a,B,b;
     A=1.0;a=1.0;B=-1.0;b=1.0;
-//    sim.setRandomIC();
     sim.setTaylorGreenIC(A,a,B,b);
+//  sim.setVorticityIC();
+//    sim.setMixingLayerIC(0.0);
     sim.writeUV(0);
-    sim.computeTaylorGreenError(0.0);
+    sim.computeTaylorGreenError(0.0 );
 
     double t = sim.dt;
     double globalError = 0.0;
@@ -528,12 +588,12 @@ int main() {
 //    // Test interpolation functions
 //    sim.interpCrossTermCornerToFace();
 
-// STAGGERED GRID DIFFERENTIATION IS ORDER 2 ACCURATE
+//  STAGGERED GRID DIFFERENTIATION IS ORDER 2 ACCURATE ????? --> YES !
 //    sim.setTestStaggeredGridIC();
 //    sim.computeRHS();
 //    sim.computeStaggeredGridError();
 
-// FRACTIONAL STEP METHOD WORKS -- IF U IS VERY BIG THEN WE GET NANS, I THINK THE PROBLEM HERE IS IN THE NONDIMENSIONALIZATION AND SUBSEQUENT TIME INTEGRATION
+// FRACTIONAL STEP METHOD WORKS
 //    sim.setTestRandomIC();
 //    for (int i=1;i<Nt;i++) {
 //        sim.advance();
