@@ -8,13 +8,14 @@ https://user-images.githubusercontent.com/32913492/144205914-26fe5083-e961-43cb-
 
 # Instability of periodic array of vortices
 
-https://user-images.githubusercontent.com/32913492/144206127-cb8ac7f0-4f69-4ca6-849f-286873ea42bf.mp4
+https://user-images.githubusercontent.com/32913492/144206584-6f3f8cd1-9d74-439e-9deb-6a3687b65dfc.mp4
+
 
 # Two-dimensional isotropic turbulence (inverse cascade !)
 
 https://user-images.githubusercontent.com/32913492/144206236-b5692910-f03f-4bd3-8fbe-fe6f35885432.mp4
 
-# Code documentations
+# Code documentation
 Local compile instructions for the code: 
 
 ```g++ -I ../eigen-3.4.0 -I ./io-tools -I /opt/homebrew/opt/fftw/include -L /opt/homebrew/opt/fftw/lib -lfftw3 -lm main.cpp -o main```
