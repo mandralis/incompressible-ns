@@ -236,7 +236,7 @@ public:
             meanDiv += abs(div(i));
         }
         meanDiv /= Nq;
-        if (print) { std::cout << "Mean divergence after projection is: " << meanDiv << std::endl; }
+        if (print) {std::cout << "Mean divergence after projection is: " << meanDiv << std::endl;}
     }
 
     void computeVorticity() {
@@ -377,10 +377,25 @@ public:
         // Initialize the fourier coefficients of vorticity with equal magnitude 1 but arbitrary phases.
         // Excite all wavenumbers, change this later
         double M = 1000.0;
-        for (int i=0;i<Nq;i++){
-            omega_hat[i][0] = M*cos(angle(rng));
-            omega_hat[i][1] = M*sin(angle(rng));
+        int count = 0;
+        for (int j=0;j<Nx;j++) {
+            for (int i=0;i<Ny;i++) {
+                double theta = angle(rng);
+                if (Nx/4<=j<=3*Nx/4 and Ny/4<=j<=3*Ny/4 ) {
+                    omega_hat[count][0] = M*cos(theta);
+                    omega_hat[count][1] = M*sin(theta);
+                } else {
+                    omega_hat[count][0] = 0.0;
+                    omega_hat[count][1] = 0.0;
+                }
+                count++;
+            }
         }
+//        for (int i=0;i<Nq;i++){
+////            double theta = angle(rng);
+//            omega_hat[i][0] = M*cos(angle(rng));
+//            omega_hat[i][1] = M*sin(angle(rng));
+//        }
         // Compute psi_hat
         for (int i=1;i<Nq;i++){
             psi_hat[i][0] = omega_hat[i][0] / (kX(i)*kX(i) + kY(i)*kY(i));
@@ -408,6 +423,95 @@ public:
         }
         computeVorticity();
     }
+
+    void setImpingingVortexIC() {
+    // Random number generator
+    std::random_device dev;
+    std::mt19937 rng(dev());
+    std::uniform_real_distribution<double> angle(0.0,2*M_PI); // uniform distribution in range [0, 2pi]
+
+    // FFTW setup
+    fftw_complex *omega_, *omega_hat, *psi, *psi_hat;
+    fftw_plan forward_plan_omega, inverse_plan_psi;
+    omega_ = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * Nq);
+    omega_hat = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * Nq);
+    psi = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * Nq);
+    psi_hat = (fftw_complex*)   fftw_malloc(sizeof(fftw_complex) * Nq);
+    forward_plan_omega = fftw_plan_dft_2d(Nx, Ny, omega_, omega_hat, FFTW_FORWARD, FFTW_ESTIMATE);
+    inverse_plan_psi = fftw_plan_dft_2d(Nx, Ny, psi_hat, psi, FFTW_BACKWARD, FFTW_ESTIMATE);
+
+    // Set the vorticity field
+    // Vortex center
+    double vortexX = 3*M_PI/4;
+    double vortexY = M_PI;
+    double vortexR = M_PI/4;
+    double Gamma0 = 1;
+    double sigma = 0.21*vortexR;
+    int count = 0;
+    double x,y;
+    for (int j=0;j<Nx;j++) {
+        for (int i=0;i<Ny;i++) {
+            x = gridX(count);
+            y = gridY(count);
+            // Compute distance from vortex center
+            double d = vortexR - sqrt((x-vortexX)*(x-vortexX) + (y-vortexY)*(y-vortexY));
+            if (d>=0.0) {
+                omega_[count][0] = Gamma0/M_PI/(sigma*sigma)*exp(-d/(sigma*sigma));
+                omega_[count][1] = 0.0;
+            } else {
+                omega_[count][0] = 0.0;
+                omega_[count][1] = 0.0;
+            }
+            count++;
+        }
+    }
+
+    // Fourier transform the vorticity field
+    fftw_execute(forward_plan_omega);
+
+    // Compute psi_hat
+    for (int i=1;i<Nq;i++){
+        psi_hat[i][0] = omega_hat[i][0] / (kX(i)*kX(i) + kY(i)*kY(i));
+        psi_hat[i][1] = omega_hat[i][1] / (kX(i)*kX(i) + kY(i)*kY(i));
+    }
+    // Set the fourier coefficient at (0,0) to an arbitrary value...it is just the mean
+    psi_hat[0][0] = 0.0;
+    psi_hat[0][1] = 0.0;
+    // Compute the inverse fourier transform of psi_hat
+    fftw_execute(inverse_plan_psi);
+    // Normalize the elements of psi by 1/(Nx*Ny)
+    for (int i=0;i<Nq;i++) {
+        psi[i][0] = psi[i][0]/(Nx*Ny);
+        psi[i][1] = psi[i][1]/(Nx*Ny);
+    }
+    // Finally the velocity field is computed by finite differencing the stream function psi
+    int iX_,iXX,iY_,iYY;
+    for (int i=0;i<Nq;i++) {
+        getAdjacentIndices(i, iX_,iXX,iY_,iYY);
+        u(i) = 1/dy * (psi[i][0]-psi[iYY][0]);
+        v(i) = -1/dx * (psi[i][0]-psi[iX_][0]);
+        // Non dimensionalize !
+//        u(i) /= velocity_scale;
+//        v(i) /= velocity_scale;
+    }
+    // Set some fluid moving the right just before the vortex ring
+    std::uniform_real_distribution<double> dist(-0.03,0.03); // distribution in range [-1, 1]
+    count = 0;
+    for (int j=0;j<Nx;j++) {
+        for (int i=0;i<Ny;i++) {
+            x = gridX(count);
+            if (x<M_PI/2) {
+                u(count)=0.5 + dist(rng);
+                v(count)=0.0;
+            }
+            // Non-dimensionalize the velocity !
+            u(count)/=velocity_scale;
+            v(count)/=velocity_scale;
+            count++;
+        }
+    }
+    computeVorticity();
+}
 
     void setMixingLayerIC(double fraction_still) {
         std::random_device dev;
@@ -456,8 +560,8 @@ public:
         std::uniform_real_distribution<double> dist(-1.0,1.0); // distribution in range [-1, 1]
         double x,y;
         for (int i=0;i<Nq;i++) {
-            u(i) = dist(rng);
-            v(i) = dist(rng);
+            u(i) = dist(rng)/velocity_scale;
+            v(i) = dist(rng)/velocity_scale;
         }
     }
 
@@ -505,24 +609,37 @@ public:
         fu.open("u_" + std::to_string(iter) + ".csv");
         fv.open("v_" + std::to_string(iter) + ".csv");
         fomega.open("omega_" + std::to_string(iter) + ".csv");
-        fp.open("p_" + std::to_string(iter) + ".csv");
+//        fp.open("p_" + std::to_string(iter) + ".csv");
         for (int i=0;i<Nq;i++){
             fu << u(i) <<",";
             fv << v(i)<<",";
             fomega << omega(i)<<",";
-            fp << p[i][0]<<",";
+//            fp << p[i][0]<<",";
         }
         fu.close();
         fv.close();
         fomega.close();
     }
 
+    void writeDiv() {
+        // Writes the divergence to a CSV file
+        ofstream fdiv;
+        fdiv.open("div.csv",std::ios_base::app);
+        double meanDiv = 0.0;
+        for (int i=0;i<Nq;i++){
+            meanDiv+=abs(div(i));
+        }
+        meanDiv/=Nq;
+        fdiv << meanDiv <<",";
+        fdiv.close();
+    }
+
     void writeGridCoordinates() {
         // Writes the gridCoordinates
         ofstream fgrid,fgridU,fgridV;
         fgrid.open("grid.csv");
-        fgridU.open("grid.csv");
-        fgridV.open("grid.csv");
+        fgridU.open("gridU.csv");
+        fgridV.open("gridV.csv");
         for (int i=0;i<Nq;i++){
             fgrid << gridX(i)<<","<<gridY(i)<<std::endl;
             fgridU << gridXU(i)<<","<<gridYU(i)<<std::endl;
@@ -541,16 +658,16 @@ int main() {
     // Once U0 is found, since Lx and Re will be set by the user, adapt the viscosity to match this
 
     // Non-dimensionalization
-    double Re = 10000;
+    double Re = 1000;
     double U0 = 1.0;
     double Lx = 1.0;
 
     // Grid
-    int Nx = 512;
+    int Nx = 256;
 
     // Time
-    double T = 0.01;
-    int Nt = 10;
+    double T = 10.0;
+    int Nt = 1000;
 
     // Square, uniform grid
     double Ly = Lx;
@@ -558,11 +675,13 @@ int main() {
 
     Simulation sim(Re, U0, Lx, Ly, Nx, Ny, Nt, T);
 
+//    sim.setRandomIC();
     double A,a,B,b;
     A=1.0;a=1.0;B=-1.0;b=1.0;
     sim.setTaylorGreenIC(A,a,B,b);
-//  sim.setVorticityIC();
+//    sim.setVorticityIC();
 //    sim.setMixingLayerIC(0.0);
+//    sim.setImpingingVortexIC();
     sim.writeUV(0);
     sim.computeTaylorGreenError(0.0 );
 
@@ -573,6 +692,7 @@ int main() {
         std::cout<<"iter="<<i<<std::endl;
         sim.advance();
         sim.writeUV(i);
+//        sim.writeDiv();
         error = sim.computeTaylorGreenError(t);
         t += sim.dt;
         globalError += error;

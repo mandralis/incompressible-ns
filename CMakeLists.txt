@@ -8,6 +8,6 @@ INCLUDE_DIRECTORIES(./steppers)
 INCLUDE_DIRECTORIES(./io-tools)
 
 set(CMAKE_CXX_STANDARD 14)
-set(SOURCE_FILES main.cpp io-tools/eigen-io.h)
+set(SOURCE_FILES main.cpp io-tools/eigen-io.h hw3.cpp grid.h)
 
 add_executable(incompressible_ns ${SOURCE_FILES})
